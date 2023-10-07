@@ -1,98 +1,14 @@
 const { ApolloServer } = require('@apollo/server')
 const { startStandaloneServer } = require('@apollo/server/standalone')
 const { v1: uuid } = require('uuid')
+const mongoose = require('mongoose')
+require('dotenv').config()
+const bookModel = require('./models/book')
+const authorModel = require('./models/author')
+const userModel = require('./models/user')
+const { GraphQLError } = require('graphql')
+const jwt = require('jsonwebtoken')
 
-let authors = [
-  {
-    name: 'Robert Martin',
-    id: "afa51ab0-344d-11e9-a414-719c6709cf3e",
-    born: 1952,
-  },
-  {
-    name: 'Martin Fowler',
-    id: "afa5b6f0-344d-11e9-a414-719c6709cf3e",
-    born: 1963
-  },
-  {
-    name: 'Fyodor Dostoevsky',
-    id: "afa5b6f1-344d-11e9-a414-719c6709cf3e",
-    born: 1821
-  },
-  { 
-    name: 'Joshua Kerievsky', // birthyear not known
-    id: "afa5b6f2-344d-11e9-a414-719c6709cf3e",
-  },
-  { 
-    name: 'Sandi Metz', // birthyear not known
-    id: "afa5b6f3-344d-11e9-a414-719c6709cf3e",
-  },
-]
-
-/*
- * Suomi:
- * Saattaisi olla järkevämpää assosioida kirja ja sen tekijä tallettamalla kirjan yhteyteen tekijän nimen sijaan tekijän id
- * Yksinkertaisuuden vuoksi tallennamme kuitenkin kirjan yhteyteen tekijän nimen
- *
- * English:
- * It might make more sense to associate a book with its author by storing the author's id in the context of the book instead of the author's name
- * However, for simplicity, we will store the author's name in connection with the book
- *
- * Spanish:
- * Podría tener más sentido asociar un libro con su autor almacenando la id del autor en el contexto del libro en lugar del nombre del autor
- * Sin embargo, por simplicidad, almacenaremos el nombre del autor en conección con el libro
-*/
-
-let books = [
-  {
-    title: 'Clean Code',
-    published: 2008,
-    author: 'Robert Martin',
-    id: "afa5b6f4-344d-11e9-a414-719c6709cf3e",
-    genres: ['refactoring']
-  },
-  {
-    title: 'Agile software development',
-    published: 2002,
-    author: 'Robert Martin',
-    id: "afa5b6f5-344d-11e9-a414-719c6709cf3e",
-    genres: ['agile', 'patterns', 'design']
-  },
-  {
-    title: 'Refactoring, edition 2',
-    published: 2018,
-    author: 'Martin Fowler',
-    id: "afa5de00-344d-11e9-a414-719c6709cf3e",
-    genres: ['refactoring']
-  },
-  {
-    title: 'Refactoring to patterns',
-    published: 2008,
-    author: 'Joshua Kerievsky',
-    id: "afa5de01-344d-11e9-a414-719c6709cf3e",
-    genres: ['refactoring', 'patterns']
-  },  
-  {
-    title: 'Practical Object-Oriented Design, An Agile Primer Using Ruby',
-    published: 2012,
-    author: 'Sandi Metz',
-    id: "afa5de02-344d-11e9-a414-719c6709cf3e",
-    genres: ['refactoring', 'design']
-  },
-  {
-    title: 'Crime and punishment',
-    published: 1866,
-    author: 'Fyodor Dostoevsky',
-    id: "afa5de03-344d-11e9-a414-719c6709cf3e",
-    genres: ['classic', 'crime']
-  },
-  {
-    title: 'The Demon ',
-    published: 1872,
-    author: 'Fyodor Dostoevsky',
-    id: "afa5de04-344d-11e9-a414-719c6709cf3e",
-    genres: ['classic', 'revolution']
-  },
-]
 
 /*
   you can remove the placeholder query once your first one has been implemented 
@@ -104,6 +20,7 @@ const typeDefs = `
     authorCount: Int!
     allBooks(author: String, genre: String): [Book!]!
     allAuthors: [Author!]!
+    me: User
   }
   type Mutation {
     addBook(
@@ -118,12 +35,22 @@ const typeDefs = `
         setBornTo: Int!
     ): Author
 
+    createUser(
+      username: String!
+      favoriteGenre: String!
+    ): User
+
+    login(
+      username: String!
+      password: String!
+    ): Token
+
     }
 
     type Book {
         title: String!
         published: Int!
-        author: String!
+        author: Author!
         id: ID!
         genres: [String!]!
     }
@@ -134,49 +61,148 @@ const typeDefs = `
         born: Int
         bookCount: Int!
     }
+
+    type User {
+      username: String!
+      favoriteGenre: String!
+      id: ID!
+    }
+    
+    type Token {
+      value: String!
+    }
 `
+
+//mongo client
+const url = process.env.MONGODB_URI
+mongoose.set('strictQuery', false)
+mongoose.connect(url)
 
 const resolvers = {
   Query: {
-    bookCount: () => books.length,
-    authorCount: () => authors.length,
+    bookCount: () => bookModel.collection.countDocuments(),
+    authorCount: () => authorModel.collection.countDocuments(),
     allBooks: (root, args) => {
+      const author_id = authorModel.findOne({ name: args.author })
+      try {
         if (!args.author && !args.genre) {
-            return books
-        }
-        if (args.author && !args.genre) {
-            return books.filter(book => book.author === args.author)
-        }
-        if (!args.author && args.genre) {
-            return books.filter(book => book.genres.includes(args.genre))
-        }
-        return books.filter(book => book.author === args.author && book.genres.includes(args.genre))
+          return bookModel.find({}).populate('author').exec()
+      }
+      if (args.author && !args.genre) {
+          return bookModel.find({ author: author_id }).populate('author').exec()
+      }
+      if (!args.author && args.genre) {
+          return bookModel.find({ genres: { $in: [args.genre] } }).populate('author').exec()
+      }
+      if (args.author && args.genre) {
+          return bookModel.find({ author: author_id, genres: { $in: [args.genre] } }).populate('author').exec()
+      }
+        
+      } catch (error) {
+        throw new GraphQLError('Error in allBooks resolver', {
+          extensions: {
+            error: error.message
+          }
+        })
+      }
+
     },
-    allAuthors: () => authors.map(author => {
-      const bookCount = books.filter(book => book.author === author.name).length
-      return { ...author, bookCount }
-    })
+    allAuthors: async () => {
+      try {
+        const authors = await authorModel.find({}).exec()
+        const books = await bookModel.find({}).exec()
+        return authors.map(author => {
+            const bookCount = books.filter(book => book.author.toString() === author.id.toString()).length
+            return { ...author._doc, bookCount }
+        })
+      } catch (error) {
+        throw new GraphQLError('Error in allAuthors resolver', {
+          extensions: {
+            error: error.message
+          }
+        })
+      }
+    },
+    me: (root, args, context) => {
+      console.log(context)
+      return context.currentUser
+    }
   },
     Mutation: {
-        addBook: (root, args) => {
-            const book = { ...args, id: uuid() }
-            books = books.concat(book)
-            if (!authors.includes(args.author)) {
-                authors = authors.concat({ name: args.author, id: uuid() })
+        addBook: async (root, args) => {
+            const author = await authorModel.find({ name: args.author })
+            if (author.length === 0) {
+                const newAuthor = new authorModel({ name: args.author })
+                try {
+                await newAuthor.save()
+                } catch (error) {
+                  throw new GraphQLError('Error in addBook resolver when saving new author', {
+                    extensions: {
+                      error: error.message
+                    }
+                  })
+                }
             }
-            return book
+            const authorToSave = await authorModel.findOne({ name: args.author })
+            const book = { ...args, author: authorToSave }
+            const newBook = new bookModel(book)
+            try {
+              await newBook.save()
+            } catch (error) {
+              throw new GraphQLError('Error in addBook resolver when saving new book', {
+                extensions: {
+                  error: error.message
+                }
+              })
+            }
+            return newBook
         },
-        editAuthor: (root, args) => {
-            const author = authors.find(author => author.name === args.name)
+        editAuthor: async (root, args) => {
+          try {
+            const author = await authorModel.findOne({ name: args.name })
             if (!author) {
                 return null
             }
-            const updatedAuthor = { ...author, born: args.setBornTo }
-            authors = authors.map(author => author.name === args.name ? updatedAuthor : author)
-            return updatedAuthor
+            author.born = args.setBornTo
+            return authorModel.findByIdAndUpdate(author.id, author, { new: true })
+          } catch (error) {
+            throw new GraphQLError('Error in editAuthor resolver', {
+              extensions: {
+                error: error.message
+              }
+            })
+          }
         },
+        login: async (root, args) => {
+          const user = await userModel.findOne({ username: args.username })
+          if (!user || args.password !== 'secret') {
+            throw new UserInputError('Wrong credentials')
+          }
+          const userForToken = {
+            username: user.username,
+            id: user._id
+          }
+          return { value: jwt.sign(userForToken, process.env.JWT_SECRET) }
+        },
+        createUser: async (root, args) => {
+          const user = new userModel({ username: args.username, favoriteGenre: args.favoriteGenre })
+          try {
+            await user.save()
+          } catch (error) {
+            throw new UserInputError(error.message, {
+              extensions: {
+                error: error.message
+              }
+            })
+          }
+          return user
+        }
     },
 }
+
+
+
+
 
 const server = new ApolloServer({
   typeDefs,
@@ -185,6 +211,18 @@ const server = new ApolloServer({
 
 startStandaloneServer(server, {
   listen: { port: 4000 },
+  introspection: true,
+  context: async ({ req, res }) => {
+    const auth = req ? req.headers.authorization : null
+    if (auth && auth.startsWith('Bearer ')) {
+      const decodedToken = jwt.verify(
+        auth.substring(7), process.env.JWT_SECRET
+      )
+      const currentUser = await userModel
+        .findById(decodedToken.id)
+      return { currentUser }
+    }
+  },
 }).then(({ url }) => {
   console.log(`Server ready at ${url}`)
 })
